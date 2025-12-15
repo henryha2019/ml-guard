@@ -1,3 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+venv/
+.env/
+.env.local
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose.override.yml
+
+# Node / frontend
+node_modules/
+.next/
+out/
+
+# IDEs
+.vscode/
+.idea/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+terraform.tfvars
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
