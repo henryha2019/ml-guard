@@ -3,13 +3,20 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
+from app.core.config import settings
 from app.db.session import get_db
 from app.db.models import DailyDrift
 from app.api.events import require_api_key
-from app.services.drift import capture_baseline, compute_daily_psi
-from app.services.drift import compute_daily_psi_all, classify_severity
+from app.services.drift import (
+    capture_baseline,
+    compute_daily_psi,
+    compute_daily_psi_all,
+    classify_severity,
+)
+from app.services.slack import send_slack_message, SlackError
 
 router = APIRouter(tags=["drift"])
+
 
 @router.post("/drift/baseline/capture")
 def baseline_capture(
@@ -39,6 +46,7 @@ def baseline_capture(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+
 @router.post("/drift/compute")
 def drift_compute(
     request: Request,
@@ -64,6 +72,7 @@ def drift_compute(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+
 @router.get("/drift/daily")
 def drift_daily(
     request: Request,
@@ -85,6 +94,7 @@ def drift_daily(
     row = db.scalars(stmt).first()
     if not row:
         raise HTTPException(status_code=404, detail="No drift computed for that key")
+
     return {
         "project_id": row.project_id,
         "model_id": row.model_id,
@@ -92,6 +102,7 @@ def drift_daily(
         "day": str(row.day),
         "psi": row.psi,
     }
+
 
 @router.post("/drift/compute_all")
 def drift_compute_all(
@@ -101,6 +112,9 @@ def drift_compute_all(
     endpoint: str = Query("predict"),
     day: date = Query(...),
     overwrite: bool = Query(True),
+
+    alert: bool = Query(False, description="Send Slack alert if max PSI >= threshold"),
+    threshold: float = Query(0.25, ge=0.0, description="PSI threshold for alert"),
     db: Session = Depends(get_db),
 ):
     require_api_key(request)
@@ -115,7 +129,7 @@ def drift_compute_all(
         )
 
         # Add severity labels (presentation-friendly)
-        psi_map = out["psi"]
+        psi_map = out.get("psi", {})
         enriched = {}
         max_item = None  # (feature, psi)
 
@@ -126,10 +140,43 @@ def drift_compute_all(
                 max_item = (feat, v)
 
         out["psi"] = enriched
+
         if max_item:
             out["max_psi_feature"] = max_item[0]
             out["max_psi"] = float(max_item[1])
             out["max_severity"] = classify_severity(float(max_item[1]))
+
+        # Optional Slack alert (never fail request if Slack fails)
+        if alert and out.get("max_psi") is not None:
+            max_psi = float(out["max_psi"])
+            if max_psi >= threshold:
+                feat = out.get("max_psi_feature", "unknown")
+
+                lines = []
+                for f, p in sorted(out["psi"].items()):
+                    lines.append(
+                        f"- PSI({f})={float(p['psi']):.3f} ({p['severity']}, n={p['n']})"
+                    )
+
+                msg = (
+                    "🚨 *ML Guard Drift Alert*\n"
+                    f"*Project:* `{project_id}`\n"
+                    f"*Model:* `{model_id}`\n"
+                    f"*Endpoint:* `{endpoint}`\n"
+                    f"*Day:* `{day}`\n"
+                    f"*Max drift:* `{feat}` PSI={max_psi:.3f} (threshold={threshold})\n"
+                    + "\n".join(lines)
+                )
+
+                try:
+                    # send_slack_message respects settings.slack_enabled
+                    send_slack_message(msg)
+                    out["slack_alert_sent"] = True
+                    out["slack_enabled"] = bool(settings.slack_enabled)
+                except SlackError as e:
+                    out["slack_alert_sent"] = False
+                    out["slack_enabled"] = bool(settings.slack_enabled)
+                    out["slack_error"] = str(e)
 
         return out
 

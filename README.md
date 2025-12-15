@@ -1,16 +1,3 @@
-Below is a **public-GitHub-optimized README**, plus:
-
-1. a **Quickstart demo script** (copy-paste runnable)
-2. a **clear architecture diagram** (Markdown / ASCII, GitHub-friendly)
-
-This version is written to:
-
-* attract recruiters
-* reassure users it’s real
-* keep scope tight and credible
-
----
-
 # ML Guard
 
 **Lightweight ML Monitoring & Cost Guard for Small Teams**
@@ -280,19 +267,6 @@ This enables:
 * Custom metrics (no Prometheus)
 * AWS-only (v1)
 * Minimal dashboard
-
----
-
-## 🧠 Resume Signal
-
-> **Built and deployed a production MLOps monitoring system with drift detection, cost attribution, alerting, and infrastructure-as-code on AWS.**
-
-This project demonstrates:
-
-* MLOps fundamentals
-* Cloud cost awareness
-* Monitoring & reliability thinking
-* Production system design
 
 ---
 
