@@ -84,7 +84,7 @@ ML Guard focuses on:
 │ AWS Cost     │      │   FastAPI Backend  │      │  Dashboard   │
 │ Explorer     │─────▶│  - ingest events   │◀────▶│ (Next/Dash)  │
 └──────────────┘      │  - API & auth      │      └──────────────┘
-                       └─────────┬──────────┘
+                      └─────────┬──────────┘
                                  │
                                  │ async jobs
                                  ▼
@@ -313,74 +313,83 @@ ml-guard/
 ├── README.md
 ├── LICENSE
 ├── .gitignore
+├── .editorconfig
 ├── .env.example
-├── docker-compose.yml
 ├── Makefile
+├── docker-compose.yml
 ├── docs/
 │   ├── architecture.md
 │   ├── api.md
-│   └── runbook.md
-├── infra/                        # Terraform: VPC + ECS + RDS + SES/SNS + IAM
+│   ├── metrics.md
+│   └── runbooks.md
+├── backend/                         # FastAPI + business logic
 │   ├── README.md
-│   ├── main.tf
-│   ├── variables.tf
-│   ├── outputs.tf
-│   ├── versions.tf
-│   └── modules/
-│       ├── network/
-│       ├── ecs_service/
-│       ├── rds_postgres/
-│       └── iam_cost_explorer/
-├── backend/                      # FastAPI
-│   ├── README.md
-│   ├── pyproject.toml
-│   ├── uv.lock (or requirements.txt)
-│   ├── alembic.ini
+│   ├── pyproject.toml               # or requirements.txt
 │   ├── app/
 │   │   ├── main.py
+│   │   ├── api/                     # routers
+│   │   │   ├── health.py
+│   │   │   ├── projects.py
+│   │   │   ├── models.py
+│   │   │   ├── ingest.py            # /events endpoint
+│   │   │   ├── alerts.py
+│   │   │   └── auth.py              # simple API key auth
 │   │   ├── core/
 │   │   │   ├── config.py
 │   │   │   ├── logging.py
 │   │   │   └── security.py
 │   │   ├── db/
-│   │   │   ├── base.py
 │   │   │   ├── session.py
-│   │   │   └── models.py
-│   │   ├── api/
-│   │   │   ├── health.py
-│   │   │   ├── projects.py
-│   │   │   ├── models.py
-│   │   │   ├── ingest.py
-│   │   │   ├── metrics.py
-│   │   │   ├── alerts.py
-│   │   │   └── billing.py
+│   │   │   ├── base.py
+│   │   │   └── migrations/          # alembic
+│   │   ├── models/                  # SQLAlchemy models
+│   │   ├── schemas/                 # Pydantic
 │   │   ├── services/
-│   │   │   ├── drift.py
-│   │   │   ├── psi.py
-│   │   │   ├── cost_explorer.py
-│   │   │   ├── alert_router.py
-│   │   │   └── scheduler.py
-│   │   ├── workers/
-│   │   │   └── jobs.py
-│   │   └── schemas/
-│   │       ├── ingest.py
-│   │       ├── metrics.py
-│   │       └── alerts.py
-│   ├── tests/
-│   └── Dockerfile
-├── frontend/                     # minimal dashboard
+│   │   │   ├── drift/
+│   │   │   │   ├── psi.py
+│   │   │   │   └── baseline.py
+│   │   │   ├── cost/
+│   │   │   │   ├── cost_explorer.py
+│   │   │   │   └── allocator.py     # map costs to “project/model/endpoint”
+│   │   │   ├── metrics.py           # latency, pred dist, input stats
+│   │   │   └── alerts/
+│   │   │       ├── email.py
+│   │   │       └── slack.py
+│   │   ├── jobs/                    # scheduled jobs (called by worker)
+│   │   │   ├── compute_metrics.py
+│   │   │   ├── compute_drift.py
+│   │   │   ├── pull_costs.py
+│   │   │   └── send_alerts.py
+│   │   └── tests/
+│   ├── Dockerfile
+│   └── alembic.ini
+├── worker/                          # background runner (Celery/RQ/APS cheduler)
 │   ├── README.md
-│   ├── package.json
-│   ├── next.config.js
-│   ├── tsconfig.json
-│   ├── src/
-│   │   ├── app/
-│   │   ├── components/
-│   │   └── lib/api.ts
-│   └── Dockerfile
-└── .github/
-    └── workflows/
-        ├── backend-ci.yml
-        ├── frontend-ci.yml
-        └── deploy.yml
+│   ├── Dockerfile
+│   └── worker.py
+├── dashboard/                       # minimal UI (Next.js OR Dash)
+│   ├── README.md
+│   └── (your choice)
+├── infra/                           # Terraform
+│   ├── README.md
+│   ├── envs/
+│   │   ├── dev/
+│   │   └── prod/
+│   ├── modules/
+│   │   ├── network/                 # VPC, subnets
+│   │   ├── ecs/                     # ECS cluster + services
+│   │   ├── rds/                     # Postgres
+│   │   ├── iam/                     # roles/policies
+│   │   └── observability/           # logs, alarms
+│   └── scripts/
+│       └── bootstrap.sh
+└── sdk/                             # tiny Python SDK users install: pip install ml-guard
+    ├── README.md
+    ├── pyproject.toml
+    └── ml_guard/
+        ├── __init__.py
+        ├── client.py
+        ├── decorators.py            # wrap inference to measure latency
+        └── types.py
+
 ```
