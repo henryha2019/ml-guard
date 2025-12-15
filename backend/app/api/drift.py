@@ -7,6 +7,7 @@ from app.db.session import get_db
 from app.db.models import DailyDrift
 from app.api.events import require_api_key
 from app.services.drift import capture_baseline, compute_daily_psi
+from app.services.drift import compute_daily_psi_all, classify_severity
 
 router = APIRouter(tags=["drift"])
 
@@ -91,3 +92,46 @@ def drift_daily(
         "day": str(row.day),
         "psi": row.psi,
     }
+
+@router.post("/drift/compute_all")
+def drift_compute_all(
+    request: Request,
+    project_id: str = Query(...),
+    model_id: str = Query(...),
+    endpoint: str = Query("predict"),
+    day: date = Query(...),
+    overwrite: bool = Query(True),
+    db: Session = Depends(get_db),
+):
+    require_api_key(request)
+    try:
+        out = compute_daily_psi_all(
+            db=db,
+            project_id=project_id,
+            model_id=model_id,
+            endpoint=endpoint,
+            day=day,
+            overwrite=overwrite,
+        )
+
+        # Add severity labels (presentation-friendly)
+        psi_map = out["psi"]
+        enriched = {}
+        max_item = None  # (feature, psi)
+
+        for feat, payload in psi_map.items():
+            v = float(payload["psi"])
+            enriched[feat] = {**payload, "severity": classify_severity(v)}
+            if (max_item is None) or (v > max_item[1]):
+                max_item = (feat, v)
+
+        out["psi"] = enriched
+        if max_item:
+            out["max_psi_feature"] = max_item[0]
+            out["max_psi"] = float(max_item[1])
+            out["max_severity"] = classify_severity(float(max_item[1]))
+
+        return out
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))

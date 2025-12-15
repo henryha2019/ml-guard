@@ -14,7 +14,8 @@ HEADERS = {
     "X-API-Key": API_KEY,
 }
 
-PROJECT = "demo_project"
+RUN_ID = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+PROJECT = f"demo_project_{RUN_ID}"
 MODEL = "demo_model_v1"
 ENDPOINT = "predict"
 
@@ -123,6 +124,13 @@ def compute_drift(day: str, feature="age"):
     r.raise_for_status()
     return r.json()
 
+def compute_drift_all(day: str):
+    url = f"{BASE_URL}/api/v1/drift/compute_all"
+    params = {"project_id": PROJECT, "model_id": MODEL, "endpoint": ENDPOINT, "day": day}
+    r = requests.post(url, params=params, headers={"X-API-Key": API_KEY}, timeout=15)
+    r.raise_for_status()
+    return r.json()
+
 
 # -----------------------------
 # Main demo flow
@@ -134,8 +142,12 @@ if __name__ == "__main__":
     ingest_events(n=200, drift=False)
     time.sleep(0.2)
 
-    print("\n2️⃣ Capturing baseline (age)")
-    capture_baseline(feature="age", n=200, n_bins=10)
+    print("\n2️⃣ Capturing baselines (age, balance)")
+    b1 = capture_baseline(feature="age", n=200, n_bins=10)
+    print(f"✅ Baseline captured: age n={b1['n_baseline']}, bins={len(b1['baseline_probs'])}")
+
+    b2 = capture_baseline(feature="balance", n=200, n_bins=10)
+    print(f"✅ Baseline captured: balance n={b2['n_baseline']}, bins={len(b2['baseline_probs'])}")
 
     print("\n3️⃣ Sending drifted traffic")
     ingest_events(n=200, drift=True)
@@ -163,3 +175,12 @@ if __name__ == "__main__":
 
     print("\n🚨 Drift Result")
     print(f"PSI(age) = {psi_value:.3f} → {severity(psi_value)}")
+
+    print("\n6️⃣ Computing PSI drift (all numeric features)")
+    dr = compute_drift_all(day)
+
+    print("\n🚨 Drift Results (PSI)")
+    for feat, payload in sorted(dr["psi"].items()):
+        print(f"PSI({feat}) = {payload['psi']:.3f} → {payload['severity']} (n={payload['n']})")
+
+    print(f"\nMax drift: {dr['max_psi_feature']} PSI={dr['max_psi']:.3f} → {dr['max_severity']}")

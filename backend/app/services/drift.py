@@ -241,3 +241,122 @@ def compute_daily_psi(
         "psi": float(score),
         "n": len(vals),
     }
+
+def compute_daily_psi_all(
+    db: Session,
+    project_id: str,
+    model_id: str,
+    endpoint: str,
+    day: date,
+    overwrite: bool = True,
+) -> dict:
+    """
+    Compute PSI for all numeric features found in events.features for the given day.
+    Baselines must already exist for each feature (capture_baseline endpoint).
+    Stores results into DailyDrift.psi as:
+      {"age": {"psi": 0.12, "n": 300}, "balance": {"psi": 0.34, "n": 300}}
+    """
+    # Load all baselines for this model/endpoint
+    base_stmt = (
+        select(FeatureBaseline)
+        .where(FeatureBaseline.project_id == project_id)
+        .where(FeatureBaseline.model_id == model_id)
+        .where(FeatureBaseline.endpoint == endpoint)
+    )
+    baselines = list(db.scalars(base_stmt).all())
+    baseline_map = {b.feature: b for b in baselines}
+
+    if not baseline_map:
+        raise ValueError("No baselines found. Capture at least one baseline first.")
+
+    start, end = _day_range_utc(day)
+
+    evt_stmt = (
+        select(Event)
+        .where(Event.project_id == project_id)
+        .where(Event.model_id == model_id)
+        .where(Event.endpoint == endpoint)
+        .where(Event.timestamp >= start)
+        .where(Event.timestamp < end)
+    )
+    events = list(db.scalars(evt_stmt).all())
+    if not events:
+        raise ValueError(f"No events found for {project_id}/{model_id}/{endpoint} on {day}")
+
+    # Collect numeric values per feature
+    values_by_feature: dict[str, list[float]] = {}
+    for e in events:
+        feats = e.features or {}
+        for k, v in feats.items():
+            if _is_number(v):
+                values_by_feature.setdefault(k, []).append(float(v))
+
+    # Compute PSI for numeric features that have a baseline
+    results: dict[str, dict] = {}
+    missing_baseline = []
+
+    for feature, vals in values_by_feature.items():
+        baseline = baseline_map.get(feature)
+        if not baseline:
+            missing_baseline.append(feature)
+            continue
+        if len(vals) < 10:
+            # too few samples: skip (don’t error)
+            continue
+
+        actual_probs = _hist_probs(vals, list(baseline.bin_edges))
+        score = psi(list(baseline.baseline_probs), actual_probs)
+        results[feature] = {"psi": float(score), "n": len(vals)}
+
+    if not results and missing_baseline:
+        raise ValueError(
+            f"No PSI computed. Missing baselines for: {', '.join(sorted(missing_baseline))}"
+        )
+    if not results:
+        raise ValueError("No PSI computed (no numeric features with enough samples).")
+
+    # Upsert daily drift row
+    drift_stmt = (
+        select(DailyDrift)
+        .where(DailyDrift.project_id == project_id)
+        .where(DailyDrift.model_id == model_id)
+        .where(DailyDrift.endpoint == endpoint)
+        .where(DailyDrift.day == day)
+    )
+    row = db.scalars(drift_stmt).first()
+
+    if row is None:
+        row = DailyDrift(
+            project_id=project_id,
+            model_id=model_id,
+            endpoint=endpoint,
+            day=day,
+            psi=results,
+        )
+        db.add(row)
+    else:
+        if overwrite:
+            row.psi = results
+        else:
+            psi_map = dict(row.psi or {})
+            psi_map.update(results)
+            row.psi = psi_map
+
+    db.commit()
+
+    return {
+        "project_id": project_id,
+        "model_id": model_id,
+        "endpoint": endpoint,
+        "day": str(day),
+        "psi": results,
+        "missing_baseline": sorted(missing_baseline),
+    }
+
+
+def classify_severity(psi_value: float) -> str:
+    if psi_value < 0.10:
+        return "OK"
+    if psi_value < 0.25:
+        return "WARN"
+    return "ALERT"
