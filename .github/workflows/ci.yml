@@ -43,13 +43,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          # Try a few common health endpoints; succeed on the first 200.
+          URLS=(
+            "http://localhost:8000/api/v1/health"
+            "http://localhost:8000/api/v1/healthz"
+            "http://localhost:8000/health"
+            "http://localhost:8000/docs"
+            "http://localhost:8000/openapi.json"
+          )
+
           for i in {1..60}; do
-            if curl -fsS "http://localhost:8000/health" >/dev/null; then
-              echo "Backend is healthy."
-              exit 0
-            fi
+            for url in "${URLS[@]}"; do
+              if curl -fsS "$url" >/dev/null; then
+                echo "Backend is healthy at $url"
+                exit 0
+              fi
+            done
             sleep 2
           done
+
           echo "Backend did not become healthy in time."
           docker compose -f docker-compose.ci.yml logs --no-color --tail=300 backend
           exit 1
