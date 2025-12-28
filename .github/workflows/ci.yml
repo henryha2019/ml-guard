@@ -14,12 +14,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Only export AWS creds on trusted pushes to main (Option B policy)
       - name: Export AWS credentials for docker compose (Option B)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: bash
         run: |
           set -euo pipefail
 
-          # Option B: fail early if secrets are missing
           if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ] || [ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then
             echo "Missing AWS secrets. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in repo secrets."
             exit 1
@@ -28,7 +29,7 @@ jobs:
           echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
           echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
 
-          # Pin region explicitly (Cost Explorer endpoint)
+          # Pin region explicitly for Cost Explorer
           echo "AWS_REGION=us-east-1" >> $GITHUB_ENV
           echo "AWS_DEFAULT_REGION=us-east-1" >> $GITHUB_ENV
 
@@ -59,8 +60,9 @@ jobs:
         run: |
           docker compose -f docker-compose.ci.yml up --no-deps --abort-on-container-exit --exit-code-from smoke smoke
 
+      # Option B validation: only on trusted pushes to main
       - name: Validate AWS Cost Explorer via API call (Option B)
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: bash
         run: |
           set -euo pipefail
@@ -75,6 +77,7 @@ jobs:
 
           if [ "$STATUS" -ne 200 ]; then
             echo "Cost Explorer API failed with status $STATUS"
+            echo "Response body:"
             cat "$RESPONSE_FILE"
             exit 1
           fi
