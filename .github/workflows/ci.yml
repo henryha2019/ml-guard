@@ -20,36 +20,62 @@ jobs:
         run: |
           echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
           echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
-          # Optional if you use temporary creds
           if [ -n "${{ secrets.AWS_SESSION_TOKEN }}" ]; then
             echo "AWS_SESSION_TOKEN=${{ secrets.AWS_SESSION_TOKEN }}" >> $GITHUB_ENV
           fi
-          # Keep region explicit (Cost Explorer uses us-east-1 endpoint)
           echo "AWS_REGION=us-east-1" >> $GITHUB_ENV
           echo "AWS_DEFAULT_REGION=us-east-1" >> $GITHUB_ENV
 
-      - name: Build and run smoke test (docker compose)
+      - name: Build and start services (docker compose)
         run: |
-          docker compose -f docker-compose.ci.yml up --build --abort-on-container-exit --exit-code-from smoke
-      
+          docker compose -f docker-compose.ci.yml up -d --build
+          docker compose -f docker-compose.ci.yml ps
+
+      - name: Wait for backend to be ready
+        run: |
+          set -e
+          for i in {1..60}; do
+            if curl -fsS "http://localhost:8000/api/v1/health" >/dev/null; then
+              echo "backend ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "backend not ready in time"
+          docker compose -f docker-compose.ci.yml logs --no-color --tail=300
+          exit 1
+
+      - name: Run smoke test
+        run: |
+          docker compose -f docker-compose.ci.yml run --rm smoke
+
       - name: Debug Cost Explorer endpoint
         run: |
-          curl -i "http://localhost:8000/api/v1/costs/pull?project_id=ci_project&day=2025-12-27" \
-            -H "X-API-Key: demo-key"
+          DAY=$(date -u -d "yesterday" +%F)
+          echo "Debug day=$DAY"
+          curl -sS -i -X POST "http://localhost:8000/api/v1/costs/pull?project_id=ci_project&day=${DAY}&overwrite=true" \
+            -H "X-API-Key: demo-key" | tee /tmp/costs_debug.txt
 
+      # Optional: only run if AWS secrets exist (prevents failures on forks)
       - name: Validate AWS Cost Explorer via API call
+        if: ${{ secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != '' }}
         run: |
-          # Pull yesterday's costs (more reliable than "today" since CE data can lag)
+          set -e
           DAY=$(date -u -d "yesterday" +%F)
           echo "Querying Cost Explorer for day=$DAY"
-          curl -s -X POST "http://localhost:8000/api/v1/costs/pull?project_id=ci_project&day=${DAY}&overwrite=true" \
+
+          curl -sS -X POST "http://localhost:8000/api/v1/costs/pull?project_id=ci_project&day=${DAY}&overwrite=true" \
             -H "X-API-Key: demo-key" | python -m json.tool
 
-          # Check stored costs exist
-          curl -s "http://localhost:8000/api/v1/costs/daily?project_id=ci_project&day=${DAY}" \
+          curl -sS "http://localhost:8000/api/v1/costs/daily?project_id=ci_project&day=${DAY}" \
             -H "X-API-Key: demo-key" | python -m json.tool
 
       - name: Logs on failure
         if: failure()
         run: |
           docker compose -f docker-compose.ci.yml logs --no-color --tail=300
+
+      - name: Teardown
+        if: always()
+        run: |
+          docker compose -f docker-compose.ci.yml down -v
