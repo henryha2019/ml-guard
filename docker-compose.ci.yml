@@ -36,11 +36,13 @@ services:
       retries: 30
 
   smoke:
-    build: ./backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.smoke
     depends_on:
       backend:
         condition: service_healthy
     environment:
       BASE_URL: http://backend:8000
       API_KEY: demo-key
-    command: python demo/quickstart.py
+    command: ["python", "demo/quickstart.py"]
