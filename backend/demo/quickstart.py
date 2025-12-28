@@ -4,6 +4,7 @@ import time
 import random
 import requests
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 # -----------------------------
 # Config
@@ -33,6 +34,13 @@ BASELINE_TS_BUFFER_SEC = 2
 # -----------------------------
 # Helpers
 # -----------------------------
+def today_tz_iso(tz: str) -> str:
+    """
+    Return the calendar day in the requested IANA timezone.
+    This must NOT depend on the container's system timezone (often UTC in CI).
+    """
+    return datetime.now(timezone.utc).astimezone(ZoneInfo(tz)).date().isoformat()
+
 def today_local_iso() -> str:
     """
     We use the system local date for the demo day. The backend performs timezone-aware slicing
@@ -193,7 +201,7 @@ def compute_drift_all(day: str, tz: str, alert: bool = True, threshold: float = 
 # Main demo flow
 # -----------------------------
 if __name__ == "__main__":
-    day_local = today_local_iso()
+    day_local = today_tz_iso(TZ)
 
     print(f"\n🧪 Run ID: {RUN_ID}")
     print(f"🧩 Project: {PROJECT}")
@@ -239,7 +247,12 @@ if __name__ == "__main__":
 
     print("\n📊 Daily Metrics Summary")
     print(f"- n_events: {metrics['n_events']}")
-    print(f"- latency p50 / p95 (ms): {metrics['latency_p50_ms']:.1f} / {metrics['latency_p95_ms']:.1f}")
+    p50 = metrics.get("latency_p50_ms")
+    p95 = metrics.get("latency_p95_ms")
+    if p50 is None or p95 is None:
+        print("- latency p50 / p95 (ms): N/A / N/A")
+    else:
+        print(f"- latency p50 / p95 (ms): {p50:.1f} / {p95:.1f}")
     print(f"- y_pred_rate: {metrics['y_pred_rate']:.3f}")
     print(f"- y_proba_mean: {metrics['y_proba_mean']:.3f}")
 
