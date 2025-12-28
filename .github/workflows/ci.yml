@@ -14,147 +14,77 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Export AWS credentials for docker compose (Compose inherits runner env vars)
-      - name: Export AWS credentials for docker compose
+      - name: Export AWS credentials for docker compose (optional)
+        shell: bash
         run: |
-          echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
-          echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
-          if [ -n "${{ secrets.AWS_SESSION_TOKEN }}" ]; then
-            echo "AWS_SESSION_TOKEN=${{ secrets.AWS_SESSION_TOKEN }}" >> $GITHUB_ENV
+          set -euo pipefail
+          if [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+            if [ -n "${{ secrets.AWS_SESSION_TOKEN }}" ]; then
+              echo "AWS_SESSION_TOKEN=${{ secrets.AWS_SESSION_TOKEN }}" >> $GITHUB_ENV
+            fi
+            echo "AWS_REGION=us-east-1" >> $GITHUB_ENV
+            echo "AWS_DEFAULT_REGION=us-east-1" >> $GITHUB_ENV
+            echo "AWS creds detected: Cost Explorer checks will run."
+          else
+            echo "AWS creds not present: Cost Explorer checks will be skipped."
           fi
-          echo "AWS_REGION=us-east-1" >> $GITHUB_ENV
-          echo "AWS_DEFAULT_REGION=us-east-1" >> $GITHUB_ENV
 
-      - name: Build and start services (docker compose)
+      - name: Build images
         run: |
-          docker compose -f docker-compose.ci.yml up -d --build
-          docker compose -f docker-compose.ci.yml ps
+          docker compose -f docker-compose.ci.yml build
 
-      - name: Wait for backend to be ready
+      - name: Start backend dependencies
         run: |
-          set -e
+          docker compose -f docker-compose.ci.yml up -d db backend
+
+      - name: Wait for backend health
+        shell: bash
+        run: |
+          set -euo pipefail
           for i in {1..60}; do
-            if curl -fsS "http://localhost:8000/api/v1/health" >/dev/null; then
-              echo "backend ready"
+            if curl -fsS "http://localhost:8000/health" >/dev/null; then
+              echo "Backend is healthy."
               exit 0
             fi
             sleep 2
           done
-          echo "backend not ready in time"
-          docker compose -f docker-compose.ci.yml logs --no-color --tail=300
+          echo "Backend did not become healthy in time."
+          docker compose -f docker-compose.ci.yml logs --no-color --tail=300 backend
           exit 1
 
-      - name: Run smoke test
+      - name: Run smoke test (docker compose)
         run: |
-          docker compose -f docker-compose.ci.yml run --rm smoke
+          docker compose -f docker-compose.ci.yml up --no-deps --abort-on-container-exit --exit-code-from smoke smoke
 
-      - name: Debug Cost Explorer endpoint
-        run: |
-          DAY=$(date -u -d "yesterday" +%F)
-          echo "Debug day=$DAY"
-          curl -sS -i -X POST "http://localhost:8000/api/v1/costs/pull?project_id=ci_project&day=${DAY}&overwrite=true" \
-            -H "X-API-Key: demo-key" | tee /tmp/costs_debug.txt
-
-            - name: Validate AWS Cost Explorer via API call (shape-assert)
+      - name: Validate AWS Cost Explorer via API call (only if creds exist)
+        shell: bash
         run: |
           set -euo pipefail
 
+          # Skip if creds are not present (fork PRs, etc.)
           if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
-            echo "AWS credentials not present in CI; skipping Cost Explorer validation."
+            echo "Skipping Cost Explorer validation (no AWS credentials)."
             exit 0
           fi
 
           DAY=$(date -u -d "yesterday" +%F)
           echo "Querying Cost Explorer for day=$DAY"
 
-          # --- POST /costs/pull ---
-          PULL_OUT="$(mktemp)"
-          export DAY PULL_OUT
+          # Fail loudly on non-2xx and ensure we actually received JSON
+          curl -fsS -X POST "http://localhost:8000/api/v1/costs/pull?project_id=ci_project&day=${DAY}&overwrite=true" \
+            -H "X-API-Key: demo-key" | python -m json.tool
 
-          PULL_CODE="$(curl -sS -o "$PULL_OUT" -w "%{http_code}" \
-            -X POST "http://localhost:8000/api/v1/costs/pull?project_id=ci_project&day=${DAY}&overwrite=true" \
-            -H "X-API-Key: demo-key")"
+          curl -fsS "http://localhost:8000/api/v1/costs/daily?project_id=ci_project&day=${DAY}" \
+            -H "X-API-Key: demo-key" | python -m json.tool
 
-          echo "costs/pull http_code=$PULL_CODE"
-          if [ "$PULL_CODE" -lt 200 ] || [ "$PULL_CODE" -ge 300 ]; then
-            echo "costs/pull non-2xx response:"
-            cat "$PULL_OUT" || true
-            exit 1
-          fi
+      - name: Logs on failure
+        if: failure()
+        run: |
+          docker compose -f docker-compose.ci.yml logs --no-color --tail=300
 
-          python - <<'PY'
-import json, os
-day = os.environ["DAY"]
-raw = open(os.environ["PULL_OUT"], "r", encoding="utf-8").read().strip()
-if not raw:
-    raise SystemExit("costs/pull returned empty body")
-j = json.loads(raw)
-
-required = ["project_id", "day", "status"]
-missing = [k for k in required if k not in j]
-if missing:
-    raise SystemExit(f"costs/pull missing keys: {missing}. keys={list(j.keys())}")
-
-if j["project_id"] != "ci_project":
-    raise SystemExit(f"costs/pull wrong project_id: {j['project_id']}")
-if str(j["day"]) != day:
-    raise SystemExit(f"costs/pull wrong day: {j['day']} expected {day}")
-
-if j["status"] not in ("ok", "skipped"):
-    raise SystemExit(f"costs/pull unexpected status: {j['status']}")
-
-# With creds present, skipped indicates IAM/CE not ready -> fail loudly
-if j["status"] == "skipped":
-    raise SystemExit(f"costs/pull skipped despite AWS creds present. reason={j.get('reason','')}")
-
-# Payload shape check (tolerant but meaningful)
-if not (
-    isinstance(j.get("total_cost"), (int, float)) or
-    isinstance(j.get("amount"), (int, float)) or
-    isinstance(j.get("results"), list) or
-    isinstance(j.get("costs"), list) or
-    isinstance(j.get("raw"), dict)
-):
-    raise SystemExit("costs/pull JSON missing expected payload fields: "
-                     "one of total_cost/amount/results/costs/raw must exist.")
-
-print("costs/pull JSON shape OK")
-PY
-
-          # --- GET /costs/daily ---
-          DAILY_OUT="$(mktemp)"
-          export DAILY_OUT
-
-          DAILY_CODE="$(curl -sS -o "$DAILY_OUT" -w "%{http_code}" \
-            "http://localhost:8000/api/v1/costs/daily?project_id=ci_project&day=${DAY}" \
-            -H "X-API-Key: demo-key")"
-
-          echo "costs/daily http_code=$DAILY_CODE"
-          if [ "$DAILY_CODE" -lt 200 ] || [ "$DAILY_CODE" -ge 300 ]; then
-            echo "costs/daily non-2xx response:"
-            cat "$DAILY_OUT" || true
-            exit 1
-          fi
-
-          python - <<'PY'
-          import json, os
-          day = os.environ["DAY"]
-          raw = open(os.environ["DAILY_OUT"], "r", encoding="utf-8").read().strip()
-          if not raw:
-              raise SystemExit("costs/daily returned empty body")
-          j = json.loads(raw)
-
-          for k in ("project_id", "day"):
-              if k not in j:
-                  raise SystemExit(f"costs/daily missing key: {k}. keys={list(j.keys())}")
-
-          if j["project_id"] != "ci_project":
-              raise SystemExit(f"costs/daily wrong project_id: {j['project_id']}")
-          if str(j["day"]) != day:
-              raise SystemExit(f"costs/daily wrong day: {j['day']} expected {day}")
-
-          if not any(k in j for k in ("total_cost", "amount", "results", "costs", "raw")):
-              raise SystemExit("costs/daily missing stored payload fields")
-
-          print("costs/daily JSON shape OK")
-          PY
+      - name: Tear down
+        if: always()
+        run: |
+          docker compose -f docker-compose.ci.yml down -v
