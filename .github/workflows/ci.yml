@@ -14,22 +14,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Export AWS credentials for docker compose (optional)
+      - name: Export AWS credentials for docker compose (Option B)
         shell: bash
         run: |
           set -euo pipefail
-          if [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then
-            echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
-            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
-            if [ -n "${{ secrets.AWS_SESSION_TOKEN }}" ]; then
-              echo "AWS_SESSION_TOKEN=${{ secrets.AWS_SESSION_TOKEN }}" >> $GITHUB_ENV
-            fi
-            echo "AWS_REGION=us-east-1" >> $GITHUB_ENV
-            echo "AWS_DEFAULT_REGION=us-east-1" >> $GITHUB_ENV
-            echo "AWS creds detected: Cost Explorer checks will run."
-          else
-            echo "AWS creds not present: Cost Explorer checks will be skipped."
+
+          # Option B: fail early if secrets are missing
+          if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ] || [ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then
+            echo "Missing AWS secrets. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in repo secrets."
+            exit 1
           fi
+
+          echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+
+          # Pin region explicitly (Cost Explorer endpoint)
+          echo "AWS_REGION=us-east-1" >> $GITHUB_ENV
+          echo "AWS_DEFAULT_REGION=us-east-1" >> $GITHUB_ENV
 
       - name: Build images
         run: |
@@ -43,26 +44,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          # Try a few common health endpoints; succeed on the first 200.
-          URLS=(
-            "http://localhost:8000/api/v1/health"
-            "http://localhost:8000/api/v1/healthz"
-            "http://localhost:8000/health"
-            "http://localhost:8000/docs"
-            "http://localhost:8000/openapi.json"
-          )
-
           for i in {1..60}; do
-            for url in "${URLS[@]}"; do
-              if curl -fsS "$url" >/dev/null; then
-                echo "Backend is healthy at $url"
-                exit 0
-              fi
-            done
+            if curl -fsS "http://localhost:8000/api/v1/health" >/dev/null; then
+              echo "Backend is healthy."
+              exit 0
+            fi
             sleep 2
           done
-
           echo "Backend did not become healthy in time."
           docker compose -f docker-compose.ci.yml logs --no-color --tail=300 backend
           exit 1
@@ -71,16 +59,10 @@ jobs:
         run: |
           docker compose -f docker-compose.ci.yml up --no-deps --abort-on-container-exit --exit-code-from smoke smoke
 
-      - name: Validate AWS Cost Explorer via API call (only if creds exist)
+      - name: Validate AWS Cost Explorer via API call
         shell: bash
         run: |
           set -euo pipefail
-
-          # Skip if creds are missing
-          if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
-            echo "Skipping Cost Explorer validation (no AWS credentials)."
-            exit 0
-          fi
 
           DAY=$(date -u -d "yesterday" +%F)
           echo "Querying Cost Explorer for day=$DAY"
@@ -99,6 +81,15 @@ jobs:
 
           cat "$RESPONSE_FILE" | python -m json.tool
 
-          # Validate stored costs
           curl -fsS "http://localhost:8000/api/v1/costs/daily?project_id=ci_project&day=${DAY}" \
             -H "X-API-Key: demo-key" | python -m json.tool
+
+      - name: Logs on failure
+        if: failure()
+        run: |
+          docker compose -f docker-compose.ci.yml logs --no-color --tail=300
+
+      - name: Tear down
+        if: always()
+        run: |
+          docker compose -f docker-compose.ci.yml down -v
