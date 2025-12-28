@@ -31,6 +31,11 @@ jobs:
       - name: Build and run smoke test (docker compose)
         run: |
           docker compose -f docker-compose.ci.yml up --build --abort-on-container-exit --exit-code-from smoke
+      
+      - name: Debug Cost Explorer endpoint
+        run: |
+          curl -i "http://localhost:8000/api/v1/costs/pull?project_id=ci_project&day=2025-12-27" \
+            -H "X-API-Key: demo-key"
 
       - name: Validate AWS Cost Explorer via API call
         run: |
