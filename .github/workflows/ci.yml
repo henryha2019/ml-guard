@@ -76,7 +76,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Skip if creds are not present (fork PRs, etc.)
+          # Skip if creds are missing
           if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
             echo "Skipping Cost Explorer validation (no AWS credentials)."
             exit 0
@@ -85,19 +85,20 @@ jobs:
           DAY=$(date -u -d "yesterday" +%F)
           echo "Querying Cost Explorer for day=$DAY"
 
-          # Fail loudly on non-2xx and ensure we actually received JSON
-          curl -fsS -X POST "http://localhost:8000/api/v1/costs/pull?project_id=ci_project&day=${DAY}&overwrite=true" \
-            -H "X-API-Key: demo-key" | python -m json.tool
+          RESPONSE_FILE=$(mktemp)
+          STATUS=$(curl -sS -w "%{http_code}" -o "$RESPONSE_FILE" \
+            -X POST "http://localhost:8000/api/v1/costs/pull?project_id=ci_project&day=${DAY}&overwrite=true" \
+            -H "X-API-Key: demo-key")
 
+          if [ "$STATUS" -ne 200 ]; then
+            echo "Cost Explorer API failed with status $STATUS"
+            echo "Response body:"
+            cat "$RESPONSE_FILE"
+            exit 1
+          fi
+
+          cat "$RESPONSE_FILE" | python -m json.tool
+
+          # Validate stored costs
           curl -fsS "http://localhost:8000/api/v1/costs/daily?project_id=ci_project&day=${DAY}" \
             -H "X-API-Key: demo-key" | python -m json.tool
-
-      - name: Logs on failure
-        if: failure()
-        run: |
-          docker compose -f docker-compose.ci.yml logs --no-color --tail=300
-
-      - name: Tear down
-        if: always()
-        run: |
-          docker compose -f docker-compose.ci.yml down -v
