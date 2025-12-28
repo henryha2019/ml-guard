@@ -1,36 +1,40 @@
+# app/api/metrics.py
 from datetime import date
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
 from app.db.session import get_db
 from app.db.models import DailyMetric
-from app.core.config import settings
 from app.api.events import require_api_key
 from app.services.metrics import compute_daily_metrics
 
 router = APIRouter(tags=["metrics"])
 
+
 @router.post("/metrics/compute")
 def compute(
     request: Request,
-    project_id: str = Query(...),
-    model_id: str = Query(...),
-    endpoint: str = Query("predict"),
-    day: date = Query(..., description="YYYY-MM-DD (UTC)"),
+    project_id: str,
+    model_id: str,
+    endpoint: str = "predict",
+    day: date = Query(...),
+    tz: str = Query("UTC", description="IANA timezone, e.g. America/Vancouver"),
     overwrite: bool = Query(True),
     db: Session = Depends(get_db),
 ):
     require_api_key(request)
     result = compute_daily_metrics(
-        db=db,
+        db,
         project_id=project_id,
         model_id=model_id,
         endpoint=endpoint,
         day=day,
+        tz=tz,
         overwrite=overwrite,
     )
     return result.__dict__
+
 
 @router.get("/metrics/daily")
 def read_daily(
@@ -52,7 +56,7 @@ def read_daily(
     )
     row = db.scalars(stmt).first()
     if not row:
-        raise HTTPException(status_code=404, detail="No daily metrics found for that key")
+        return None
 
     return {
         "project_id": row.project_id,
@@ -65,4 +69,5 @@ def read_daily(
         "y_pred_rate": row.y_pred_rate,
         "y_proba_mean": row.y_proba_mean,
         "feature_stats": row.feature_stats,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
     }

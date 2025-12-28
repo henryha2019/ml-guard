@@ -1,19 +1,23 @@
+# app/api/drift.py
+from __future__ import annotations
+
 from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
-from app.core.config import settings
 from app.db.session import get_db
 from app.db.models import DailyDrift
 from app.api.events import require_api_key
 from app.services.drift import (
     capture_baseline,
-    compute_daily_psi,
-    compute_daily_psi_all,
+    compute_daily_drift,
+    compute_daily_drift_all,
     classify_severity,
 )
-from app.services.slack import send_slack_message, SlackError
+from app.services.alerts import create_alert_once
+from app.services.slack import send_slack_message
+from app.core.config import settings
 
 router = APIRouter(tags=["drift"])
 
@@ -21,60 +25,180 @@ router = APIRouter(tags=["drift"])
 @router.post("/drift/baseline/capture")
 def baseline_capture(
     request: Request,
-    project_id: str = Query(...),
-    model_id: str = Query(...),
-    endpoint: str = Query("predict"),
-    feature: str = Query(..., description="numeric feature key inside features{}"),
-    n: int = Query(500, ge=50, le=50000),
-    n_bins: int = Query(10, ge=5, le=50),
+    project_id: str,
+    model_id: str,
+    endpoint: str = "predict",
+    feature: str = Query(...),
+    # legacy
+    n: int = Query(500, ge=1, le=50000),
+    n_bins: int = Query(10, ge=2, le=200),
+    # Option A: timestamp window
+    start_ts: str | None = Query(None, description="ISO8601 start, e.g. 2025-12-28T00:00:00Z"),
+    end_ts: str | None = Query(None, description="ISO8601 end (exclusive)"),
+    # Option B: day window
+    start_day: date | None = Query(None, description="Baseline start day (inclusive)"),
+    end_day: date | None = Query(None, description="Baseline end day (exclusive)"),
+    tz: str = Query("UTC", description="IANA timezone, e.g. America/Vancouver"),
     overwrite: bool = Query(True),
+    top_k_categories: int = Query(50, ge=1, le=500),
     db: Session = Depends(get_db),
 ):
     require_api_key(request)
     try:
-        result = capture_baseline(
-            db=db,
+        res = capture_baseline(
+            db,
             project_id=project_id,
             model_id=model_id,
             endpoint=endpoint,
             feature=feature,
             n=n,
             n_bins=n_bins,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            start_day=start_day,
+            end_day=end_day,
+            tz=tz,
             overwrite=overwrite,
+            top_k_categories=top_k_categories,
         )
-        return result.__dict__
-    except ValueError as e:
+        return {
+            "project_id": res.project_id,
+            "model_id": res.model_id,
+            "endpoint": res.endpoint,
+            "feature": res.feature,
+            "feature_type": res.feature_type,
+            "n_baseline": res.n_baseline,
+            "definition": res.definition,
+            "baseline_probs": res.baseline_probs,
+        }
+    except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/drift/compute")
-def drift_compute(
+def compute_one(
     request: Request,
-    project_id: str = Query(...),
-    model_id: str = Query(...),
-    endpoint: str = Query("predict"),
+    project_id: str,
+    model_id: str,
+    endpoint: str = "predict",
     day: date = Query(...),
     feature: str = Query(...),
-    overwrite: bool = Query(True),
+    tz: str = Query("UTC", description="IANA timezone, e.g. America/Vancouver"),
+    min_samples: int = Query(10, ge=1, le=100000),
     db: Session = Depends(get_db),
 ):
     require_api_key(request)
     try:
-        return compute_daily_psi(
-            db=db,
+        return compute_daily_drift(
+            db,
             project_id=project_id,
             model_id=model_id,
             endpoint=endpoint,
             day=day,
             feature=feature,
+            tz=tz,
+            min_samples=min_samples,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/drift/compute_all")
+def compute_all(
+    request: Request,
+    project_id: str,
+    model_id: str,
+    endpoint: str = "predict",
+    day: date = Query(...),
+    tz: str = Query("UTC", description="IANA timezone, e.g. America/Vancouver"),
+    min_samples: int = Query(10, ge=1, le=100000),
+    overwrite: bool = Query(True),
+    alert: bool = Query(False),
+    threshold: float = Query(0.25, ge=0.0),
+    db: Session = Depends(get_db),
+):
+    require_api_key(request)
+
+    try:
+        result = compute_daily_drift_all(
+            db,
+            project_id=project_id,
+            model_id=model_id,
+            endpoint=endpoint,
+            day=day,
+            tz=tz,
+            min_samples=min_samples,
             overwrite=overwrite,
         )
-    except ValueError as e:
+
+        alert_created = None
+        alert_id = None
+        slack_alert_sent = None
+        slack_note = None
+        slack_enabled = None
+
+        if alert:
+            max_psi = float(result["max_psi"])
+            sev = classify_severity(max_psi)
+            slack_enabled = bool(getattr(settings, "slack_enabled", False))
+
+            if max_psi >= float(threshold):
+                created, row = create_alert_once(
+                    db,
+                    project_id=project_id,
+                    model_id=model_id,
+                    endpoint=endpoint,
+                    day=day,
+                    rule="drift",
+                    severity=sev,
+                    value=max_psi,
+                    threshold=float(threshold),
+                    payload=result,
+                )
+                alert_created = created
+                alert_id = row.id if row else None
+
+                if not slack_enabled:
+                    slack_alert_sent = False
+                    slack_note = "Slack disabled; no message sent."
+                else:
+                    try:
+                        send_slack_message(
+                            text=(
+                                f"ML Guard drift alert: {project_id}/{model_id}/{endpoint} "
+                                f"day={day} tz={tz} max_feature={result['max_psi_feature']} "
+                                f"psi={max_psi:.3f} severity={sev} threshold={threshold}"
+                            )
+                        )
+                        slack_alert_sent = True
+                        slack_note = "Slack message sent."
+                    except Exception as se:
+                        slack_alert_sent = False
+                        slack_note = str(se)
+            else:
+                alert_created = False
+                alert_id = None
+                slack_alert_sent = False
+                slack_note = "No alert: max_psi below threshold."
+
+        result.update(
+            {
+                "alert_created": alert_created,
+                "alert_id": alert_id,
+                "slack_alert_sent": slack_alert_sent,
+                "slack_enabled": slack_enabled,
+                "slack_note": slack_note,
+                "threshold": float(threshold),
+            }
+        )
+        return result
+
+    except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/drift/daily")
-def drift_daily(
+def read_daily(
     request: Request,
     project_id: str,
     model_id: str,
@@ -82,8 +206,10 @@ def drift_daily(
     day: date = Query(...),
     db: Session = Depends(get_db),
 ):
+    """
+    Raw stored DailyDrift row (per-feature JSON), useful for UI.
+    """
     require_api_key(request)
-
     stmt = (
         select(DailyDrift)
         .where(DailyDrift.project_id == project_id)
@@ -93,92 +219,12 @@ def drift_daily(
     )
     row = db.scalars(stmt).first()
     if not row:
-        raise HTTPException(status_code=404, detail="No drift computed for that key")
-
+        return None
     return {
         "project_id": row.project_id,
         "model_id": row.model_id,
         "endpoint": row.endpoint,
         "day": str(row.day),
         "psi": row.psi,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
     }
-
-
-@router.post("/drift/compute_all")
-def drift_compute_all(
-    request: Request,
-    project_id: str = Query(...),
-    model_id: str = Query(...),
-    endpoint: str = Query("predict"),
-    day: date = Query(...),
-    overwrite: bool = Query(True),
-
-    alert: bool = Query(False, description="Send Slack alert if max PSI >= threshold"),
-    threshold: float = Query(0.25, ge=0.0, description="PSI threshold for alert"),
-    db: Session = Depends(get_db),
-):
-    require_api_key(request)
-    try:
-        out = compute_daily_psi_all(
-            db=db,
-            project_id=project_id,
-            model_id=model_id,
-            endpoint=endpoint,
-            day=day,
-            overwrite=overwrite,
-        )
-
-        # Add severity labels (presentation-friendly)
-        psi_map = out.get("psi", {})
-        enriched = {}
-        max_item = None  # (feature, psi)
-
-        for feat, payload in psi_map.items():
-            v = float(payload["psi"])
-            enriched[feat] = {**payload, "severity": classify_severity(v)}
-            if (max_item is None) or (v > max_item[1]):
-                max_item = (feat, v)
-
-        out["psi"] = enriched
-
-        if max_item:
-            out["max_psi_feature"] = max_item[0]
-            out["max_psi"] = float(max_item[1])
-            out["max_severity"] = classify_severity(float(max_item[1]))
-
-        # Optional Slack alert (never fail request if Slack fails)
-        if alert and out.get("max_psi") is not None:
-            max_psi = float(out["max_psi"])
-            if max_psi >= threshold:
-                feat = out.get("max_psi_feature", "unknown")
-
-                lines = []
-                for f, p in sorted(out["psi"].items()):
-                    lines.append(
-                        f"- PSI({f})={float(p['psi']):.3f} ({p['severity']}, n={p['n']})"
-                    )
-
-                msg = (
-                    "🚨 *ML Guard Drift Alert*\n"
-                    f"*Project:* `{project_id}`\n"
-                    f"*Model:* `{model_id}`\n"
-                    f"*Endpoint:* `{endpoint}`\n"
-                    f"*Day:* `{day}`\n"
-                    f"*Max drift:* `{feat}` PSI={max_psi:.3f} (threshold={threshold})\n"
-                    + "\n".join(lines)
-                )
-
-                try:
-                    # send_slack_message respects settings.slack_enabled
-                    send_slack_message(msg)
-                    out["slack_alert_sent"] = True
-                    out["slack_enabled"] = bool(settings.slack_enabled)
-                except SlackError as e:
-                    out["slack_alert_sent"] = False
-                    out["slack_enabled"] = bool(settings.slack_enabled)
-                    out["slack_error"] = str(e)
-
-        return out
-
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))

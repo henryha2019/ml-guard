@@ -1,0 +1,46 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: mlguard
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d mlguard"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://app:app@db:5432/mlguard
+      ENABLE_AUTH: "true"
+      API_KEY: demo-key
+
+      # Slack off in CI
+      SLACK_ENABLED: "false"
+
+      # AWS Cost Explorer (CI will provide credentials via GH secrets env)
+      AWS_CE_REGION: us-east-1
+      AWS_CE_COST_METRIC: UnblendedCost
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health').read()\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  smoke:
+    build: ./backend
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      BASE_URL: http://backend:8000
+      API_KEY: demo-key
+    command: python demo/quickstart.py

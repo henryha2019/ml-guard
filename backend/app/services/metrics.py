@@ -1,8 +1,11 @@
+# app/services/metrics.py
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
+
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 from sqlalchemy import select, delete
@@ -17,7 +20,6 @@ def _percentile(values: List[float], p: float) -> Optional[float]:
     vals = sorted(values)
     if len(vals) == 1:
         return float(vals[0])
-    # Linear interpolation between closest ranks
     k = (len(vals) - 1) * (p / 100.0)
     f = int(k)
     c = min(f + 1, len(vals) - 1)
@@ -32,10 +34,15 @@ def _is_number(x: Any) -> bool:
     return isinstance(x, (int, float)) and not isinstance(x, bool)
 
 
-def _day_range_utc(day: date) -> tuple[datetime, datetime]:
-    start = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
-    end = start + timedelta(days=1)
-    return start, end
+def _day_range(day: date, tz: str) -> tuple[datetime, datetime]:
+    """
+    Return [start, end) boundaries for a given local day in timezone `tz`,
+    converted to UTC for DB filtering (timestamps stored with tzinfo).
+    """
+    zone = ZoneInfo(tz)
+    start_local = datetime(day.year, day.month, day.day, 0, 0, 0, tzinfo=zone)
+    end_local = start_local + timedelta(days=1)
+    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
 
 
 @dataclass
@@ -44,6 +51,7 @@ class DailyMetricsResult:
     model_id: str
     endpoint: str
     day: date
+    tz: str
     n_events: int
     latency_p50_ms: Optional[float]
     latency_p95_ms: Optional[float]
@@ -58,9 +66,11 @@ def compute_daily_metrics(
     model_id: str,
     endpoint: str,
     day: date,
+    *,
+    tz: str = "UTC",
     overwrite: bool = True,
 ) -> DailyMetricsResult:
-    start, end = _day_range_utc(day)
+    start, end = _day_range(day, tz)
 
     stmt = (
         select(Event)
@@ -73,6 +83,7 @@ def compute_daily_metrics(
     events = list(db.scalars(stmt).all())
 
     n = len(events)
+
     latencies = [float(e.latency_ms) for e in events if e.latency_ms is not None]
     p50 = _percentile(latencies, 50)
     p95 = _percentile(latencies, 95)
@@ -95,12 +106,10 @@ def compute_daily_metrics(
         if not vals:
             continue
         mean = sum(vals) / len(vals)
-        # population std (simple, stable)
         var = sum((x - mean) ** 2 for x in vals) / len(vals)
         std = var ** 0.5
         feature_stats[k] = {"mean": float(mean), "std": float(std)}
 
-    # Upsert logic (simple v1)
     if overwrite:
         db.execute(
             delete(DailyMetric).where(
@@ -132,6 +141,7 @@ def compute_daily_metrics(
         model_id=model_id,
         endpoint=endpoint,
         day=day,
+        tz=tz,
         n_events=n,
         latency_p50_ms=p50,
         latency_p95_ms=p95,

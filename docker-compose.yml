@@ -9,14 +9,50 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d mlguard"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   backend:
     build: ./backend
-    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Database
+      DATABASE_URL: postgresql+psycopg://app:app@db:5432/mlguard
+
+      # Auth
+      ENABLE_AUTH: "true"
+      API_KEY: demo-key
+
+      # App
+      LOG_LEVEL: INFO
+
+      # Slack (off by default locally)
+      SLACK_ENABLED: "false"
+
+      # AWS Cost Explorer (optional locally)
+      AWS_CE_REGION: us-east-1
+      AWS_CE_COST_METRIC: UnblendedCost
+
+      # If present in your shell, Docker will pass them through.
+      # If absent, cost endpoints will error only when called.
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN}
+      AWS_DEFAULT_REGION: us-east-1
+
     ports:
       - "8000:8000"
-    depends_on:
-      - db
+
+    healthcheck:
+      test: ["CMD-SHELL", "python - << 'EOF'\nimport urllib.request\nurllib.request.urlopen('http://localhost:8000/api/v1/health').read()\nEOF"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
 
 volumes:
   pgdata:

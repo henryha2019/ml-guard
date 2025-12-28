@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Provide AWS credentials to containers via environment
+      # (Compose inherits env vars from the runner)
+      - name: Export AWS credentials for docker compose
+        run: |
+          echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+          # Optional if you use temporary creds
+          if [ -n "${{ secrets.AWS_SESSION_TOKEN }}" ]; then
+            echo "AWS_SESSION_TOKEN=${{ secrets.AWS_SESSION_TOKEN }}" >> $GITHUB_ENV
+          fi
+          # Keep region explicit (Cost Explorer uses us-east-1 endpoint)
+          echo "AWS_REGION=us-east-1" >> $GITHUB_ENV
+          echo "AWS_DEFAULT_REGION=us-east-1" >> $GITHUB_ENV
+
+      - name: Build and run smoke test (docker compose)
+        run: |
+          docker compose -f docker-compose.ci.yml up --build --abort-on-container-exit --exit-code-from smoke
+
+      - name: Validate AWS Cost Explorer via API call
+        run: |
+          # Pull yesterday's costs (more reliable than "today" since CE data can lag)
+          DAY=$(date -u -d "yesterday" +%F)
+          echo "Querying Cost Explorer for day=$DAY"
+          curl -s -X POST "http://localhost:8000/api/v1/costs/pull?project_id=ci_project&day=${DAY}&overwrite=true" \
+            -H "X-API-Key: demo-key" | python -m json.tool
+
+          # Check stored costs exist
+          curl -s "http://localhost:8000/api/v1/costs/daily?project_id=ci_project&day=${DAY}" \
+            -H "X-API-Key: demo-key" | python -m json.tool
+
+      - name: Logs on failure
+        if: failure()
+        run: |
+          docker compose -f docker-compose.ci.yml logs --no-color --tail=300
