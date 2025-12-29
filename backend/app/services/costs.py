@@ -26,7 +26,7 @@ def _ce_client():
     """
     Option A: local credentials.
     - If aws_profile set: boto3.Session(profile_name=...)
-    - Cost Explorer endpoint is in us-east-1. :contentReference[oaicite:5]{index=5}
+    - Cost Explorer endpoint is in us-east-1.
     """
     if settings.aws_profile:
         sess = boto3.Session(profile_name=settings.aws_profile)
@@ -52,7 +52,7 @@ def fetch_daily_costs_from_ce(
     """
     Fetch daily costs from Cost Explorer for a single UTC date.
 
-    Cost Explorer API expects TimePeriod as dates with Start inclusive / End exclusive. :contentReference[oaicite:6]{index=6}
+    Cost Explorer API expects TimePeriod as dates with Start inclusive / End exclusive.
     """
     metric = metric or settings.aws_ce_cost_metric
     start = day.isoformat()
@@ -74,8 +74,8 @@ def fetch_daily_costs_from_ce(
 
     rows: List[CostRow] = []
     for r in results:
-        # Daily results window
         groups = r.get("Groups", []) or []
+
         if not groups:
             # No grouping => one total number
             amt, unit = _parse_amount((r.get("Total") or {}).get(metric, {}))
@@ -106,10 +106,11 @@ def fetch_daily_costs_from_ce(
                 )
             )
 
-    # Also compute TOTAL from the grouped rows (more convenient for spike checks)
-    if rows:
+    # Add a convenient TOTAL if (and only if) one is not already present.
+    if rows and not any(x.service == "TOTAL" for x in rows):
         unit = rows[0].unit
-        total_amt = sum(x.amount for x in rows)
+        # Sum only non-TOTAL rows (defensive)
+        total_amt = sum(x.amount for x in rows if x.service != "TOTAL")
         rows.append(
             CostRow(
                 project_id="",
@@ -134,7 +135,10 @@ def upsert_daily_costs(
 ) -> Dict[str, Any]:
     """
     Store costs for (project_id, day).
-    If overwrite=True, we delete existing rows for that day/project first.
+    If overwrite=True, delete existing rows for that day/project first.
+
+    Also dedup within this request by (service) to avoid unique violations
+    if upstream returns duplicates (e.g., TOTAL twice).
     """
     if overwrite:
         db.execute(
@@ -145,17 +149,24 @@ def upsert_daily_costs(
         )
         db.commit()
 
+    # Deduplicate by unique key (project_id, day, service). Last row wins.
+    dedup: Dict[Tuple[str, date, str], CostRow] = {}
+    for row in rows:
+        dedup[(project_id, day, row.service)] = row
+    rows = list(dedup.values())
+
     inserted = 0
     for row in rows:
-        r = DailyCost(
-            project_id=project_id,
-            day=day,
-            service=row.service,
-            amount=row.amount,
-            unit=row.unit,
-            payload=row.payload or {},
+        db.add(
+            DailyCost(
+                project_id=project_id,
+                day=day,
+                service=row.service,
+                amount=row.amount,
+                unit=row.unit,
+                payload=row.payload or {},
+            )
         )
-        db.add(r)
         inserted += 1
 
     db.commit()
@@ -171,8 +182,20 @@ def pull_and_store_daily_costs(
     overwrite: bool = True,
 ) -> Dict[str, Any]:
     rows = fetch_daily_costs_from_ce(day=day, metric=metric, group_by_service=True)
-    # fill project_id in dataclass rows
-    rows = [CostRow(project_id=project_id, day=r.day, service=r.service, amount=r.amount, unit=r.unit, payload=r.payload) for r in rows]
+
+    # Fill project_id in dataclass rows
+    rows = [
+        CostRow(
+            project_id=project_id,
+            day=r.day,
+            service=r.service,
+            amount=r.amount,
+            unit=r.unit,
+            payload=r.payload,
+        )
+        for r in rows
+    ]
+
     res = upsert_daily_costs(db, project_id=project_id, day=day, rows=rows, overwrite=overwrite)
 
     total = next((x.amount for x in rows if x.service == "TOTAL"), None)

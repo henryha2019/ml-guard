@@ -21,38 +21,68 @@ services:
       db:
         condition: service_healthy
     environment:
-      # Database
       DATABASE_URL: postgresql+psycopg://app:app@db:5432/mlguard
-
-      # Auth
       ENABLE_AUTH: "true"
       API_KEY: demo-key
-
-      # App
       LOG_LEVEL: INFO
-
-      # Slack (off by default locally)
       SLACK_ENABLED: "false"
 
-      # AWS Cost Explorer (optional locally)
       AWS_CE_REGION: us-east-1
       AWS_CE_COST_METRIC: UnblendedCost
 
-      # If present in your shell, Docker will pass them through.
-      # If absent, cost endpoints will error only when called.
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN}
+      AWS_SDK_LOAD_CONFIG: "1"
       AWS_DEFAULT_REGION: us-east-1
+      AWS_REGION: us-east-1
+
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+
+    volumes:
+      - ${HOME}/.aws:/root/.aws:ro
 
     ports:
       - "8000:8000"
-
     healthcheck:
-      test: ["CMD-SHELL", "python - << 'EOF'\nimport urllib.request\nurllib.request.urlopen('http://localhost:8000/api/v1/health').read()\nEOF"]
+      test:
+        [
+          "CMD-SHELL",
+          "python - << 'EOF'\nimport urllib.request\nurllib.request.urlopen('http://localhost:8000/api/v1/health').read()\nEOF",
+        ]
       interval: 10s
       timeout: 5s
       retries: 20
+
+  worker:
+    build: ./backend
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://app:app@db:5432/mlguard
+      LOG_LEVEL: INFO
+
+      WORKER_TZ: America/Vancouver
+      WORKER_SLEEP_SECONDS: "300"
+      WORKER_DAY_OFFSET: "1"
+      WORKER_OVERWRITE: "true"
+      WORKER_DRIFT_MIN_SAMPLES: "10"
+
+      AWS_CE_REGION: us-east-1
+      AWS_CE_COST_METRIC: UnblendedCost
+
+      AWS_SDK_LOAD_CONFIG: "1"
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_REGION: us-east-1
+
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+
+    volumes:
+      - ${HOME}/.aws:/root/.aws:ro
+
+    command: ["python", "-m", "app.worker"]
 
 volumes:
   pgdata:
