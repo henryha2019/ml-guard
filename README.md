@@ -1,116 +1,105 @@
 # ML Guard
 
-**Lightweight ML Monitoring & Cost Guard for Small Teams**
+**Lightweight ML monitoring, drift detection, and optional AWS cost tracking for small teams.**
 
-ML Guard is a minimal, production-grade MLOps monitoring service that tracks **model health, data drift, inference performance, and AWS costs** with almost zero setup.
+ML Guard is a minimal, production-grade monitoring service for ML inference systems. It collects a single stream of inference events and derives **daily performance metrics**, **data drift signals**, **alerts**, and **(optionally) AWS Cost Explorer costs**—without requiring a full MLOps platform.
 
-It is built for teams that want **operational visibility** without running a full MLOps platform.
-
-> Think: *Datadog-lite for machine learning systems.*
+> Datadog-lite for ML systems: fast to integrate, low operational overhead, and clear signals.
 
 ---
 
-## ✨ Why This Exists
+## What you can do with ML Guard
 
-Most ML teams:
-
-* don’t need Kubeflow or full-stack MLOps platforms
-* don’t want to maintain Prometheus + Grafana
-* **do** want to know when models drift or costs spike
-
-ML Guard focuses on:
-
-* **Actionable signals**
-* **Low operational overhead**
-* **Fast integration**
-* **Clear cost ownership per model**
+* Detect **feature drift** (PSI for numeric features and frequency divergence for categorical features)
+* Track **inference latency** (p50 / p95), prediction distribution statistics, and feature statistics
+* Run a **background worker** that computes daily aggregates (timezone-aware)
+* View results in a **Streamlit dashboard**
+* Integrate via a small **Python SDK**
+* Pull **AWS Cost Explorer** daily costs (best-effort, optional)
 
 ---
 
-## 🚀 Core Features
+## Demo
 
-### Model & Data Monitoring
-
-* Input feature statistics (mean, std, distributions)
-* Data drift detection (Population Stability Index)
-* Prediction distribution monitoring
-* Inference latency (p50 / p95)
-
-### Cloud Cost Monitoring
-
-* AWS Cost Explorer integration
-* Cost attribution by **project / model / endpoint**
-* Daily cost aggregation
-* Cost spike detection
-
-### Alerting
-
-* Slack alerts
-* Email alerts
-* Threshold-based rules for drift, latency, and cost
+![ML Guard demo](assets/demo.gif)
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```text
-                        ┌────────────────────┐
-                        │   ML Application   │
-                        │ (batch or REST)    │
-                        └─────────┬──────────┘
-                                  │
-                                  │ inference events
-                                  ▼
-                        ┌────────────────────┐
-                        │   ML Guard SDK     │
-                        │ (thin Python lib) │
-                        └─────────┬──────────┘
-                                  │ HTTP
-                                  ▼
-┌──────────────┐      ┌────────────────────┐      ┌──────────────┐
-│ AWS Cost     │      │   FastAPI Backend  │      │  Dashboard   │
-│ Explorer     │─────▶│  - ingest events   │◀────▶│ (Next/Dash)  │
-└──────────────┘      │  - API & auth      │      └──────────────┘
-                      └─────────┬──────────┘
-                                 │
-                                 │ async jobs
-                                 ▼
-                       ┌────────────────────┐
-                       │ Background Worker  │
-                       │ - metrics          │
-                       │ - drift            │
-                       │ - cost ingestion   │
-                       │ - alerts           │
-                       └─────────┬──────────┘
-                                 │
-                                 ▼
-                       ┌────────────────────┐
-                       │   PostgreSQL       │
-                       │ events, metrics,   │
-                       │ drift, costs       │
-                       └────────────────────┘
+ML App (batch/REST)
+    |
+    |  inference events
+    v
+ML Guard SDK  ----HTTP---->  FastAPI Backend  <----HTTP----  Dashboard (Streamlit)
+                                  |
+                                  | writes / reads
+                                  v
+                               PostgreSQL
+                                  ^
+                                  |
+                           Background Worker
+                     (daily metrics, drift, costs, alerts)
+                                  |
+                                  v
+                         Slack / Email (optional)
 ```
 
 ---
 
-## 🔁 How It Works
+## Quickstart (local, end-to-end)
 
-1. Your model sends inference events to ML Guard
-2. Events are stored in PostgreSQL
-3. Background jobs compute:
+### Prerequisites
 
-   * latency & prediction stats
-   * feature distributions
-   * drift scores
-   * AWS cost attribution
-4. Alerts fire when thresholds are exceeded
-5. A minimal dashboard shows trends over time
+* Docker + Docker Compose
+* Python 3.10+ (only required if you run local scripts)
+
+### 1) Start the stack
+
+```bash
+docker compose up --build -d
+```
+
+Backend health check:
+
+```bash
+curl -s http://localhost:8000/api/v1/health | python -m json.tool
+```
+
+### 2) Run the demo (generates events, captures a baseline, computes metrics and drift)
+
+```bash
+python ./backend/demo/quickstart.py
+```
+
+### 3) Open the dashboard
+
+* Dashboard: `http://localhost:8501`
+* API: `http://localhost:8000`
 
 ---
 
-## 📦 Event Ingestion (Core Contract)
+## Validate everything locally (recommended)
 
-Each inference emits a small JSON payload:
+If `validation.sh` exists in the repository root:
+
+```bash
+./validation.sh
+echo $?
+```
+
+**Pass criteria**
+
+* Exit code is `0`
+* Health endpoint returns `{"status":"ok"}`
+* Demo or validation produces non-empty metrics and drift output for a generated project
+
+---
+
+## Event ingestion contract
+
+ML Guard derives metrics, drift, and alerts from a single event schema:
 
 ```json
 {
@@ -129,241 +118,125 @@ Each inference emits a small JSON payload:
 }
 ```
 
-From this single stream, ML Guard derives:
+From this stream, ML Guard computes:
 
-* inference latency metrics
-* prediction distributions
-* feature statistics
-* drift scores over time
-
----
-
-## ⚡ Quickstart (Local Demo)
-
-### Prerequisites
-
-* Docker
-* Docker Compose
-* Python 3.10+
+* Daily latency p50 / p95
+* Prediction distribution statistics (rate / mean)
+* Daily feature statistics (mean / std and distributions)
+* Daily drift (PSI or categorical divergence), when a baseline exists
 
 ---
 
-### 1️⃣ Start ML Guard locally
+## Drift detection model
+
+* **Baselines are explicit windows** (captured from a stable period)
+* **Numeric drift:** PSI with configurable bins
+* **Categorical drift:** frequency divergence
+* Drift is computed **per day** with **timezone-aware day semantics**
+* Missing baselines are handled explicitly (drift returns `missing_baseline` rather than failing silently)
+
+---
+
+## AWS Cost Explorer integration (optional)
+
+Costs are **best-effort**:
+
+* If credentials are absent, the worker logs a warning and continues
+* Costs can be pulled on demand via the API
+
+Recommended AWS setup:
+
+* Provide credentials via environment variables or mount `~/.aws` into containers (local development)
+* Set regions:
+
+  * `AWS_CE_REGION=us-east-1`
+  * `AWS_DEFAULT_REGION=us-east-1`
+
+To pull costs locally:
 
 ```bash
-git clone https://github.com/your-username/ml-guard.git
-cd ml-guard
-
-cp .env.example .env
-docker compose up --build
+curl -s -X POST "http://localhost:8000/api/v1/costs/pull?project_id=<PROJECT_ID>&day=<YYYY-MM-DD>&overwrite=true" \
+  -H "X-API-Key: demo-key" | python -m json.tool
 ```
 
-API will be available at:
-
-```
-http://localhost:8000
-```
+Note: Daily totals can be extremely small (near zero) depending on account activity. ML Guard treats this as normal.
 
 ---
 
-### 2️⃣ Send demo inference events
-
-Create `demo/send_events.py`:
+## SDK usage (minimal example)
 
 ```python
-import time
-import random
-import requests
-from datetime import datetime
+from ml_guard import MLGuardClient
 
-API_URL = "http://localhost:8000/api/v1/events"
-API_KEY = "demo-key"
+client = MLGuardClient(
+    base_url="http://localhost:8000",
+    api_key="demo-key",
+)
 
-headers = {
-    "X-API-Key": API_KEY,
-    "Content-Type": "application/json"
-}
-
-for i in range(500):
-    payload = {
-        "project_id": "demo_project",
-        "model_id": "demo_model_v1",
-        "endpoint": "predict",
-        "timestamp": datetime.utcnow().isoformat(),
-        "latency_ms": random.randint(20, 120),
-        "y_pred": random.choice([0, 1]),
-        "y_proba": random.random(),
-        "features": {
-            "age": random.randint(18, 70),
-            "balance": random.uniform(0, 5000),
-            "country": random.choice(["CA", "US", "UK"])
-        }
-    }
-
-    requests.post(API_URL, json=payload, headers=headers)
-    time.sleep(0.05)
-
-print("✅ Sent demo events")
+client.ingest_event(
+    project_id="proj_123",
+    model_id="model_v1",
+    endpoint="predict",
+    latency_ms=35,
+    y_pred=1,
+    y_proba=0.77,
+    features={"age": 31, "balance": 1500.0, "country": "CA"},
+)
 ```
 
-Run it:
+The SDK is intentionally thin. It enforces request shapes and provides convenient wrappers around the API.
+
+---
+
+## Running services
 
 ```bash
-python demo/send_events.py
+make up           # start services (detached)
+make dashboard    # start the dashboard (if separated)
+make validate     # run validation.sh
+make down         # tear down containers and volumes
 ```
 
 ---
 
-### 3️⃣ What you’ll see
+## Project structure (current)
 
-* Events stored in PostgreSQL
-* Aggregated latency & prediction stats
-* Feature distributions per model
-* Drift metrics after baseline capture
-* (Optional) Slack alerts if thresholds are set
-
----
-
-## 📊 Drift Detection
-
-* Numeric features: PSI with configurable bins
-* Categorical features: frequency divergence
-* Baselines stored per model
-* Drift tracked daily and compared to thresholds
+```text
+ml-guard/
+  backend/                 # FastAPI backend, worker, and demo
+  sdk/                     # Python client SDK (ml_guard)
+  dashboard/               # Streamlit UI
+  docker-compose.yml
+  docker-compose.ci.yml
+  Dockerfile.smoke
+  Makefile
+  validation.sh
+```
 
 ---
 
-## 💰 Cost Attribution (AWS)
+## Design decisions
 
-AWS resources must be tagged with:
-
-* `mlguard:project`
-* `mlguard:model`
-* `mlguard:endpoint`
-
-ML Guard pulls AWS Cost Explorer data daily and attributes spend accordingly.
-
-This enables:
-
-* per-model cost tracking
-* cost spike alerts
-* operational cost accountability
+* **Single event contract** minimizes integration friction and supports both batch and online inference
+* **Timezone-aware daily aggregation** avoids partial-day and boundary issues
+* **Explicit baseline capture** makes drift comparisons stable and explainable
+* **Best-effort cost ingestion** prevents optional AWS dependencies from breaking core monitoring
+* **SDK and dashboard layered over the API** enforce clean interfaces and improve testability
 
 ---
 
-## 🎯 Target Users
+## Roadmap (future extensions)
 
-* Startups with early production models
-* Indie SaaS builders
-* Consulting teams
-* Small ML teams without dedicated MLOps engineers
-
----
-
-## 🧪 MVP Scope (Intentional)
-
-* One model type (classification)
-* Batch or REST inference
-* Custom metrics (no Prometheus)
-* AWS-only (v1)
-* Minimal dashboard
+* Alembic-first migrations everywhere (no implicit schema creation)
+* Alert policy management (per-project thresholds and routing)
+* Pagination and indexing for high-volume event tables
+* Optional Prometheus exporter (without requiring Grafana)
+* Deployment reference: ECS / App Runner + RDS + IAM (least privilege)
 
 ---
 
 ## License
 
-This project is source-available but not open source.
+This project is source-available for viewing and evaluation.
 
-Viewing and evaluation are permitted.
-Commercial use, deployment, modification, or redistribution
-require explicit permission from the author.
-
-See the LICENSE file for details.
-
----
-
-```
-ml-guard/
-├── README.md
-├── LICENSE
-├── .gitignore
-├── .editorconfig
-├── .env.example
-├── Makefile
-├── docker-compose.yml
-├── docs/
-│   ├── architecture.md
-│   ├── api.md
-│   ├── metrics.md
-│   └── runbooks.md
-├── backend/                         # FastAPI + business logic
-│   ├── README.md
-│   ├── pyproject.toml               # or requirements.txt
-│   ├── app/
-│   │   ├── main.py
-│   │   ├── api/                     # routers
-│   │   │   ├── health.py
-│   │   │   ├── projects.py
-│   │   │   ├── models.py
-│   │   │   ├── ingest.py            # /events endpoint
-│   │   │   ├── alerts.py
-│   │   │   └── auth.py              # simple API key auth
-│   │   ├── core/
-│   │   │   ├── config.py
-│   │   │   ├── logging.py
-│   │   │   └── security.py
-│   │   ├── db/
-│   │   │   ├── session.py
-│   │   │   ├── base.py
-│   │   │   └── migrations/          # alembic
-│   │   ├── models/                  # SQLAlchemy models
-│   │   ├── schemas/                 # Pydantic
-│   │   ├── services/
-│   │   │   ├── drift/
-│   │   │   │   ├── psi.py
-│   │   │   │   └── baseline.py
-│   │   │   ├── cost/
-│   │   │   │   ├── cost_explorer.py
-│   │   │   │   └── allocator.py     # map costs to “project/model/endpoint”
-│   │   │   ├── metrics.py           # latency, pred dist, input stats
-│   │   │   └── alerts/
-│   │   │       ├── email.py
-│   │   │       └── slack.py
-│   │   ├── jobs/                    # scheduled jobs (called by worker)
-│   │   │   ├── compute_metrics.py
-│   │   │   ├── compute_drift.py
-│   │   │   ├── pull_costs.py
-│   │   │   └── send_alerts.py
-│   │   └── tests/
-│   ├── Dockerfile
-│   └── alembic.ini
-├── worker/                          # background runner (Celery/RQ/APS cheduler)
-│   ├── README.md
-│   ├── Dockerfile
-│   └── worker.py
-├── dashboard/                       # minimal UI (Next.js OR Dash)
-│   ├── README.md
-│   └── (your choice)
-├── infra/                           # Terraform
-│   ├── README.md
-│   ├── envs/
-│   │   ├── dev/
-│   │   └── prod/
-│   ├── modules/
-│   │   ├── network/                 # VPC, subnets
-│   │   ├── ecs/                     # ECS cluster + services
-│   │   ├── rds/                     # Postgres
-│   │   ├── iam/                     # roles/policies
-│   │   └── observability/           # logs, alarms
-│   └── scripts/
-│       └── bootstrap.sh
-└── sdk/                             # tiny Python SDK users install: pip install ml-guard
-    ├── README.md
-    ├── pyproject.toml
-    └── ml_guard/
-        ├── __init__.py
-        ├── client.py
-        ├── decorators.py            # wrap inference to measure latency
-        └── types.py
-
-```
+Commercial use, deployment, modification, or redistribution requires explicit permission from the author. See `LICENSE`.
