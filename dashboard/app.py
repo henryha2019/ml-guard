@@ -3,14 +3,16 @@ from __future__ import annotations
 import os
 from datetime import date, datetime
 from typing import Any, Dict, List
+from ml_guard import MLGuardClient 
 
 import pandas as pd
 import requests
 import streamlit as st
 
-
-BASE_URL = os.getenv("MLGUARD_BASE_URL", "http://localhost:8000").rstrip("/")
+BASE_URL = os.getenv("MLGUARD_BASE_URL", "http://localhost:8000")
 API_KEY = os.getenv("MLGUARD_API_KEY", "demo-key")
+
+client = MLGuardClient(base_url=BASE_URL, api_key=API_KEY)
 
 
 def headers() -> Dict[str, str]:
