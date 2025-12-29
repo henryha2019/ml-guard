@@ -37,6 +37,74 @@ jobs:
           docker compose -f docker-compose.ci.yml logs --no-color --tail=300 backend
           exit 1
 
+      # ----------------------------
+      # SDK smoke (runner-side)
+      # ----------------------------
+      - name: Set up Python for SDK smoke
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install SDK (editable)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ./sdk
+
+      - name: SDK smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - << 'PY'
+          from datetime import datetime, timezone
+          from ml_guard import MLGuardClient
+
+          BASE_URL = "http://localhost:8000"
+          API_KEY = "demo-key"
+
+          c = MLGuardClient(base_url=BASE_URL, api_key=API_KEY, timeout_s=15.0)
+
+          # 1) Health
+          h = c.health()
+          assert h.get("status") == "ok", h
+
+          # 2) Ingest 1 event
+          run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+          project_id = f"ci_sdk_{run_id}"
+          model_id = "demo_model_v1"
+          endpoint = "predict"
+
+          c.ingest_event(
+              project_id=project_id,
+              model_id=model_id,
+              endpoint=endpoint,
+              latency_ms=42,
+              y_pred=1,
+              y_proba=0.7,
+              features={"age": 25, "balance": 1000.0, "country": "CA"},
+          )
+
+          # 3) Discover models (proves event write + discover route)
+          models = c.list_models(project_id=project_id).get("items", [])
+          assert len(models) > 0, models
+
+          # 4) Discover days + compute metrics (proves compute endpoint)
+          days = c.list_days(project_id=project_id, model_id=model_id, endpoint=endpoint).get("days", [])
+          assert len(days) > 0, days
+          day = days[-1]
+
+          m = c.compute_metrics(
+              project_id=project_id,
+              model_id=model_id,
+              endpoint=endpoint,
+              day=day,
+              tz="UTC",
+              overwrite=True,
+          )
+          assert m.get("project_id") == project_id, m
+
+          print("SDK CI SMOKE PASSED")
+          PY
+
       - name: Run smoke test (docker compose)
         run: |
           docker compose -f docker-compose.ci.yml up --no-deps --abort-on-container-exit --exit-code-from smoke smoke
