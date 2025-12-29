@@ -54,17 +54,18 @@ services:
       retries: 20
     
   dashboard:
-    build: ./dashboard
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
     depends_on:
       backend:
         condition: service_healthy
     environment:
-      # Dashboard should call backend via compose DNS name, not localhost
       MLGUARD_BASE_URL: http://backend:8000
       MLGUARD_API_KEY: demo-key
     ports:
       - "8501:8501"
-    command: ["streamlit", "run", "app.py", "--server.address=0.0.0.0", "--server.port=8501"]
+    command: ["streamlit", "run", "dashboard/app.py", "--server.address=0.0.0.0", "--server.port=8501"]
 
   worker:
     build: ./backend
